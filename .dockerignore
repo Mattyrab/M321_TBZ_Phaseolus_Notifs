@@ -1,0 +1,6 @@
+bin/
+obj/
+deploy/
+.git/
+.gitignore
+README.md
