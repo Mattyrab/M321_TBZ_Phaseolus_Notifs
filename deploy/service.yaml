@@ -3,9 +3,12 @@ kind: Service
 metadata:
   name: beannotifs
   namespace: phaseolus
+  labels:
+    app: beannotifs
 spec:
   selector:
     app: beannotifs
   ports:
-    - port: 8080
+    - name: http
+      port: 8080
       targetPort: 8080
