@@ -9,13 +9,15 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection(RabbitMqOptions.SectionName));
 builder.Services.AddSingleton<NotificationStore>();
 
+var notificationsSent = Metrics.CreateCounter("notifications_sent_total", "Total number of notifications sent.");
+
 builder.Services.AddSingleton<IReadOnlyList<ConsumerBinding>>(sp =>
 {
     var store = sp.GetRequiredService<NotificationStore>();
     return new List<ConsumerBinding>
     {
-        new("notifs.payment-failed", "payment.failed", envelope => HandlePaymentFailedAsync(envelope, store)),
-        new("notifs.order-cooked", "order.cooked", envelope => HandleOrderCookedAsync(envelope, store)),
+        new("notifs.payment-failed", "payment.failed", envelope => HandlePaymentFailedAsync(envelope, store, notificationsSent)),
+        new("notifs.order-cooked", "order.cooked", envelope => HandleOrderCookedAsync(envelope, store, notificationsSent)),
     };
 });
 
@@ -40,15 +42,17 @@ app.MapGet("/notifications", (NotificationStore store) => store.GetAll());
 
 app.Run();
 
-static Task HandlePaymentFailedAsync(EventEnvelope envelope, NotificationStore store)
+static Task HandlePaymentFailedAsync(EventEnvelope envelope, NotificationStore store, Counter notificationsSent)
 {
     var payload = envelope.Payload.Deserialize<PaymentFailedPayload>()!;
     store.Add(new Notification(envelope.OrderId, "payment-failed", $"Payment failed: {payload.Reason}", envelope.OccurredAt));
+    notificationsSent.Inc();
     return Task.CompletedTask;
 }
 
-static Task HandleOrderCookedAsync(EventEnvelope envelope, NotificationStore store)
+static Task HandleOrderCookedAsync(EventEnvelope envelope, NotificationStore store, Counter notificationsSent)
 {
     store.Add(new Notification(envelope.OrderId, "order-cooked", "Your order is ready!", envelope.OccurredAt));
+    notificationsSent.Inc();
     return Task.CompletedTask;
 }
