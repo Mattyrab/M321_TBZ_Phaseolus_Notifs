@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Text;
 using System.Text.Json;
 using Microsoft.Extensions.Options;
@@ -22,6 +23,13 @@ public class EventConsumerHostedService : BackgroundService
     private readonly IModel _channel;
     private readonly IReadOnlyList<ConsumerBinding> _bindings;
     private readonly ILogger<EventConsumerHostedService> _logger;
+
+    // Idempotency guard: a redelivery of a message we've already fully handled (e.g.
+    // a pod crash between the handler succeeding and the ack landing, or the retry
+    // mechanism below re-publishing after a transient failure) must not re-run the
+    // handler. In-memory only and never evicted — acceptable at this project's demo
+    // scale (message-contracts-hardening plan Q3/10_target_shape non-goals).
+    private readonly ConcurrentDictionary<Guid, byte> _processedEventIds = new();
 
     public EventConsumerHostedService(
         IOptions<RabbitMqOptions> options,
@@ -84,9 +92,19 @@ public class EventConsumerHostedService : BackgroundService
             return;
         }
 
+        if (_processedEventIds.ContainsKey(envelope.EventId))
+        {
+            _logger.LogInformation(
+                "Duplicate delivery of {EventType} (order {OrderId}, event {EventId}) on {Queue} — already processed, skipping",
+                envelope.EventType, envelope.OrderId, envelope.EventId, binding.QueueName);
+            _channel.BasicAck(ea.DeliveryTag, multiple: false);
+            return;
+        }
+
         try
         {
             await binding.Handler(envelope);
+            _processedEventIds[envelope.EventId] = 0;
             _channel.BasicAck(ea.DeliveryTag, multiple: false);
         }
         catch (Exception ex)
