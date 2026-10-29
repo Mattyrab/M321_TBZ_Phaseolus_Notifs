@@ -20,11 +20,24 @@ builder.Services
     .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
     .AddJwtBearer(options =>
     {
-        options.Authority = builder.Configuration["Keycloak:Authority"];
+        var authority = builder.Configuration["Keycloak:Authority"];
+        var publicAuthority = builder.Configuration["Keycloak:PublicAuthority"];
+
+        options.Authority = authority;
         options.RequireHttpsMetadata = false; // Keycloak runs on plain HTTP inside the cluster
         options.TokenValidationParameters.ValidateAudience = true;
         options.TokenValidationParameters.ValidAudience = "phaseolus-internal-api";
         options.MapInboundClaims = false;
+
+        // The token this endpoint actually receives is the admin's own token from
+        // BeanApp's browser login, which Keycloak stamps with whatever host the
+        // browser used (PublicAuthority) -- not the in-cluster DNS name (Authority)
+        // this backend uses to reach Keycloak for discovery. Same mismatch BeanApp's
+        // own login hit; same fix.
+        if (!string.IsNullOrEmpty(publicAuthority))
+        {
+            options.TokenValidationParameters.ValidIssuer = publicAuthority;
+        }
 
         options.Events = new JwtBearerEvents
         {
