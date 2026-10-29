@@ -1,13 +1,60 @@
+using System.Security.Claims;
 using System.Text.Json;
 using BeanNotifs.HealthChecks;
 using BeanNotifs.Messaging;
 using BeanNotifs.Models;
+using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Prometheus;
 
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.Configure<RabbitMqOptions>(builder.Configuration.GetSection(RabbitMqOptions.SectionName));
 builder.Services.AddSingleton<NotificationStore>();
+
+// SSO plan Step 3: /notifications carries admin-only data (the Admin page's own
+// log of orders/payments). BeanApp forwards the logged-in admin's own Keycloak
+// token, so this validates it the same way OrderBeans does (issuer, signature,
+// shared audience from Step 1) plus the "admin" realm role, which isn't a claim
+// ASP.NET Core maps to ClaimTypes.Role on its own.
+builder.Services
+    .AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+    .AddJwtBearer(options =>
+    {
+        options.Authority = builder.Configuration["Keycloak:Authority"];
+        options.RequireHttpsMetadata = false; // Keycloak runs on plain HTTP inside the cluster
+        options.TokenValidationParameters.ValidateAudience = true;
+        options.TokenValidationParameters.ValidAudience = "phaseolus-internal-api";
+        options.MapInboundClaims = false;
+
+        options.Events = new JwtBearerEvents
+        {
+            OnTokenValidated = ctx =>
+            {
+                if (ctx.Principal?.Identity is not ClaimsIdentity identity)
+                {
+                    return Task.CompletedTask;
+                }
+
+                var realmAccess = identity.FindFirst("realm_access")?.Value;
+                if (realmAccess is null)
+                {
+                    return Task.CompletedTask;
+                }
+
+                using var doc = JsonDocument.Parse(realmAccess);
+                if (doc.RootElement.TryGetProperty("roles", out var roles))
+                {
+                    foreach (var role in roles.EnumerateArray())
+                    {
+                        identity.AddClaim(new Claim(ClaimTypes.Role, role.GetString()!));
+                    }
+                }
+
+                return Task.CompletedTask;
+            },
+        };
+    });
+builder.Services.AddAuthorization();
 
 var notificationsSent = Metrics.CreateCounter("notifications_sent_total", "Total number of notifications sent.");
 
@@ -34,13 +81,17 @@ builder.Services.AddHealthChecks()
 
 var app = builder.Build();
 
+app.UseAuthentication();
+app.UseAuthorization();
+
 app.UseHttpMetrics();
 app.MapMetrics();
 
 app.MapHealthChecks("/healthz/live", new() { Predicate = c => c.Tags.Contains("live") });
 app.MapHealthChecks("/healthz/ready", new() { Predicate = c => c.Tags.Contains("ready") });
 
-app.MapGet("/notifications", (NotificationStore store) => store.GetAll());
+app.MapGet("/notifications", (NotificationStore store) => store.GetAll())
+    .RequireAuthorization(policy => policy.RequireRole("admin"));
 
 app.Run();
 
